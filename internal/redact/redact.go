@@ -15,7 +15,9 @@ var patterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`),
 	regexp.MustCompile(`(?i)\b[a-z0-9._%+-]+:[^\s@/]{6,}@[a-z0-9.-]+\b`),
 	regexp.MustCompile(`\bws_live_[A-Za-z0-9_-]{8,}\b`),
-	regexp.MustCompile(`\bwss_[A-Za-z0-9_-]{16,}\b`),
+	// This agent's own token. `generate_token` joins prefix and secret with
+	// no separator, so a pattern expecting `wss_` matched nothing at all.
+	regexp.MustCompile(`\bwss[A-Za-z0-9_-]{20,}\b`),
 	regexp.MustCompile(`(?i)\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`),
 }
 

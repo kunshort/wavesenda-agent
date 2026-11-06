@@ -43,3 +43,13 @@ func TestTruncateSaysItTruncated(t *testing.T) {
 		t.Error("truncated something that fitted")
 	}
 }
+
+func TestTheAgentsOwnTokenIsScrubbed(t *testing.T) {
+	// `generate_token` joins the prefix and the secret with no separator, so a
+	// pattern expecting `wss_` matched nothing — and the one credential this
+	// program holds would have travelled in a log tail.
+	log := "config: {\"token\": \"wss8ZkqpMuAbcdefghijklmnopqrstuv\"}"
+	if strings.Contains(Clean(log), "8ZkqpMuAbcdefghijklmnopqrstuv") {
+		t.Errorf("the agent token survived redaction: %s", Clean(log))
+	}
+}
