@@ -133,7 +133,11 @@ func Registry() map[string]Capability {
 		{"cert.expiry", TierRead, certExpiry},
 		{"http.check", TierRead, httpCheck},
 
+		{"deploy.history", TierRead, deployHistory},
+
 		{"service.restart", TierReversible, serviceRestart},
+		{"deploy.run", TierReversible, deployRun},
+		{"deploy.rollback", TierReversible, deployRollback},
 		{"disk.reclaim", TierReversible, diskReclaim},
 		{"cert.renew", TierReversible, certRenew},
 	}
