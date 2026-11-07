@@ -71,8 +71,16 @@ go test ./...
 go build -ldflags "-X main.Version=$(git describe --tags)" -o wavesenda-agent .
 ```
 
-Releases are built for `linux/amd64` and `linux/arm64`, published with a
-SHA-256 the installer verifies before the binary is ever executed.
+Releases are cut by tagging `apps/daemon/vX.Y.Z` in the main repository. The
+workflow formats, vets and tests, builds static `linux/amd64` and
+`linux/arm64` binaries with `CGO_ENABLED=0`, publishes a SHA-256 beside each,
+and pushes the source and the assets to the public mirror
+`kunshort/wavesenda-agent`.
+
+The mirror exists because the main repository is private, and a binary
+somebody pipes into a root shell cannot need a token to fetch. The installer
+there is the same file as the one in this directory, released from the same
+commit as the binary it installs.
 
 ## Removing it
 

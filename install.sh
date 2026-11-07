@@ -23,7 +23,10 @@ set -eu
 
 TOKEN="${1:-}"
 API="${WAVESENDA_API:-https://api.wavesenda.com/api/internal/servers}"
-RELEASES="${WAVESENDA_RELEASES:-https://get.wavesenda.com/releases}"
+# The public mirror, because this is fetched by machines that have never heard
+# of us and must not need a token. `latest` resolves through GitHub's own
+# redirect, so there is no version list to keep in step with anything.
+RELEASES="${WAVESENDA_RELEASES:-https://github.com/kunshort/wavesenda-agent/releases}"
 VERSION="${WAVESENDA_VERSION:-latest}"
 
 die() { printf 'wavesenda: %s\n' "$1" >&2; exit 1; }
@@ -43,7 +46,11 @@ printf 'Installing the WaveSenda agent (%s)\n' "$ARCH"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-BINARY="$RELEASES/$VERSION/wavesenda-agent-linux-$ARCH"
+if [ "$VERSION" = "latest" ]; then
+  BINARY="$RELEASES/latest/download/wavesenda-agent-linux-$ARCH"
+else
+  BINARY="$RELEASES/download/v$VERSION/wavesenda-agent-linux-$ARCH"
+fi
 curl -fsSL "$BINARY" -o "$TMP/agent" || die "could not download the agent"
 curl -fsSL "$BINARY.sha256" -o "$TMP/agent.sha256" || die "could not download the checksum"
 
