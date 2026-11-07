@@ -1,0 +1,5 @@
+# Build output. Releases are built by CI and published with a checksum; a
+# binary committed here would be one nobody could verify.
+/wavesenda-agent
+/dist/
+*.test
