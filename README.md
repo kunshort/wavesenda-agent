@@ -3,7 +3,8 @@
 The program that runs on a customer's own server.
 
 ```sh
-curl -fsSL https://get.wavesenda.com/agent | sh -s -- <token>
+curl -fsSL https://github.com/kunshort/wavesenda-agent/releases/latest/download/install.sh \
+  | sh -s -- <token>
 ```
 
 ## What it is

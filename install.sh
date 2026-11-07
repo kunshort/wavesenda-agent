@@ -2,7 +2,8 @@
 #
 # Install the WaveSenda agent on this server.
 #
-#   curl -fsSL https://get.wavesenda.com/agent | sh -s -- <token>
+#   curl -fsSL https://github.com/kunshort/wavesenda-agent/releases/latest/download/install.sh \
+#     | sh -s -- <token>
 #
 # Read this before you run it. We are asking you to pipe a script from the
 # internet into a root shell, and being casual about that would teach exactly
