@@ -119,3 +119,33 @@ func TestNothingDestructiveIsCompiledIn(t *testing.T) {
 		}
 	}
 }
+
+// Which Docker failures are worth a second attempt through sudo, and which
+// are an answer in themselves. Getting this wrong either hides a stopped
+// Docker behind a permissions message or retries a question that was already
+// answered properly.
+
+func TestDockerRefusalsAreToldApart(t *testing.T) {
+	denied := "Got permission denied while trying to connect to the Docker " +
+		"daemon socket at unix:///var/run/docker.sock"
+	down := "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. " +
+		"Is the docker daemon running?"
+
+	if !refusedTheSocket(denied) {
+		t.Error("a permission denial was not recognised as the socket refusing us")
+	}
+	if dockerIsDown(denied) {
+		t.Error("a permission denial was reported as Docker being stopped")
+	}
+
+	if !refusedTheSocket(down) {
+		t.Error("a stopped daemon was not recognised as worth one retry")
+	}
+	if !dockerIsDown(down) {
+		t.Error("a stopped daemon was not recognised as such")
+	}
+
+	if refusedTheSocket("Error response from daemon: No such container: web") {
+		t.Error("an ordinary Docker error was treated as a permissions problem")
+	}
+}

@@ -83,14 +83,39 @@ func containersList(ctx context.Context, _ Args) (string, error) {
 		return "Docker is not installed on this machine.", nil
 	}
 
-	out, err := run(ctx, 15*time.Second,
-		"docker", "ps", "--all", "--no-trunc",
-		"--format", "{{.Names}}\t{{.State}}\t{{.Status}}\t{{.Image}}")
+	args := []string{
+		"ps", "--all", "--no-trunc",
+		"--format", "{{.Names}}\t{{.State}}\t{{.Status}}\t{{.Image}}",
+	}
+
+	out, err := run(ctx, 15*time.Second, "docker", args...)
+	if err != nil && refusedTheSocket(out) {
+		// The agent runs as its own unprivileged user and the Docker socket is
+		// root-owned. The usual advice — put the user in the `docker` group —
+		// hands it the ability to start a privileged container, which is root
+		// on the host by another name. The whole point of this agent is that
+		// what it may elevate is a handful of named commands in a file anyone
+		// can read, so `docker ps` becomes one more of them and nothing else
+		// about Docker does.
+		out, err = run(ctx, 15*time.Second, "sudo", append([]string{"-n", "docker"}, args...)...)
+	}
 	if err != nil {
-		// Almost always the daemon being unreachable or this user not being in
-		// the docker group. Said plainly, because both are fixed in one step
-		// and neither is a fault in the container being asked about.
-		return "", fmt.Errorf("could not ask Docker: %w", err)
+		switch {
+		case dockerIsDown(out):
+			// An answer, not a failure: "Docker itself is not running" is
+			// exactly what somebody asking after their containers needs.
+			return "Docker is installed but its daemon is not running.", nil
+		case refusedTheSocket(out):
+			// Said as the one step that fixes it. An operator reading
+			// "permission denied" about containers they can see running
+			// learns nothing about where the permission is missing.
+			return "", fmt.Errorf("this agent may not talk to Docker here — " +
+				"re-run the installer to grant it `docker ps`, or add " +
+				"`wavesenda ALL=(root) NOPASSWD: /usr/bin/docker ps *` to " +
+				"/etc/sudoers.d/wavesenda")
+		default:
+			return "", fmt.Errorf("could not ask Docker: %w", err)
+		}
 	}
 
 	var running, other []string
@@ -129,6 +154,26 @@ func containersList(ctx context.Context, _ Args) (string, error) {
 		text += fmt.Sprintf("\n\n%d not running:\n%s", len(other), strings.Join(other, "\n"))
 	}
 	return text, nil
+}
+
+// refusedTheSocket reports whether Docker turned us away rather than failing
+// at the thing we asked for.
+//
+// Matched on the text because the exit status does not distinguish it: the
+// client exits 1 both for "I cannot reach the socket" and for "there is no
+// such container", and only the first is fixed by a line in a sudoers file.
+func refusedTheSocket(out string) bool {
+	lowered := strings.ToLower(out)
+	return strings.Contains(lowered, "permission denied") ||
+		strings.Contains(lowered, "docker.sock") ||
+		strings.Contains(lowered, "is the docker daemon running")
+}
+
+// dockerIsDown reports whether Docker is installed and simply not running.
+func dockerIsDown(out string) bool {
+	lowered := strings.ToLower(out)
+	return strings.Contains(lowered, "is the docker daemon running") ||
+		strings.Contains(lowered, "cannot connect to the docker daemon")
 }
 
 func serviceStatus(ctx context.Context, args Args) (string, error) {

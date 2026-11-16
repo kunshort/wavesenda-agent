@@ -11,7 +11,7 @@
 #
 #   1. Downloads one binary over TLS and checks it against a published SHA-256.
 #   2. Creates a `wavesenda` user that owns nothing and can log in nowhere.
-#   3. Writes a sudoers file naming the three commands that user may elevate.
+#   3. Writes a sudoers file naming each command that user may elevate.
 #      Not ALL. You can read it at /etc/sudoers.d/wavesenda afterwards.
 #   4. Writes your token to a file only that user can read.
 #   5. Installs a systemd service and starts it.
@@ -82,6 +82,11 @@ wavesenda ALL=(root) NOPASSWD: /bin/systemctl restart *, /usr/bin/systemctl rest
 wavesenda ALL=(root) NOPASSWD: /usr/bin/journalctl --vacuum-size=200M
 wavesenda ALL=(root) NOPASSWD: /usr/bin/apt-get clean
 wavesenda ALL=(root) NOPASSWD: /usr/bin/certbot renew --cert-name * --non-interactive
+# Reading what Docker is running, and nothing else about Docker. The usual
+# advice is to put this user in the `docker` group, which would let it start a
+# privileged container — root on this machine by another name. `docker ps`
+# cannot change anything, whatever flags it is given.
+wavesenda ALL=(root) NOPASSWD: /usr/bin/docker ps *, /bin/docker ps *
 SUDO
 chmod 0440 /etc/sudoers.d/wavesenda
 visudo -cf /etc/sudoers.d/wavesenda >/dev/null || {
