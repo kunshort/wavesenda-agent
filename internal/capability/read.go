@@ -79,7 +79,12 @@ func serviceList(ctx context.Context, _ Args) (string, error) {
 // failing, because "Docker is not installed here" is an answer and an error is
 // not.
 func containersList(ctx context.Context, _ Args) (string, error) {
-	if _, err := exec.LookPath("docker"); err != nil {
+	// The absolute path, and it is used for both attempts below. sudo matches
+	// what a rule names, and resolving `docker` through its own secure_path
+	// can land on a different copy than the one we just found — a wrapper in
+	// /usr/local/bin shadowing /usr/bin/docker is enough for the rule to miss.
+	docker, err := exec.LookPath("docker")
+	if err != nil {
 		return "Docker is not installed on this machine.", nil
 	}
 
@@ -88,7 +93,7 @@ func containersList(ctx context.Context, _ Args) (string, error) {
 		"--format", "{{.Names}}\t{{.State}}\t{{.Status}}\t{{.Image}}",
 	}
 
-	out, err := run(ctx, 15*time.Second, "docker", args...)
+	out, err := run(ctx, 15*time.Second, docker, args...)
 	if err != nil && refusedTheSocket(out) {
 		// The agent runs as its own unprivileged user and the Docker socket is
 		// root-owned. The usual advice — put the user in the `docker` group —
@@ -97,7 +102,7 @@ func containersList(ctx context.Context, _ Args) (string, error) {
 		// what it may elevate is a handful of named commands in a file anyone
 		// can read, so `docker ps` becomes one more of them and nothing else
 		// about Docker does.
-		out, err = run(ctx, 15*time.Second, "sudo", append([]string{"-n", "docker"}, args...)...)
+		out, err = run(ctx, 15*time.Second, "sudo", append([]string{"-n", docker}, args...)...)
 	}
 	if err != nil {
 		switch {
@@ -114,7 +119,11 @@ func containersList(ctx context.Context, _ Args) (string, error) {
 				"`wavesenda ALL=(root) NOPASSWD: /usr/bin/docker ps *` to " +
 				"/etc/sudoers.d/wavesenda")
 		default:
-			return "", fmt.Errorf("could not ask Docker: %w", err)
+			// With what was actually said, not only the exit status. A bare
+			// "sudo failed: exit status 1" names neither the reason nor the
+			// fix, and sudo's own line — a path the rule does not cover, a
+			// password being asked for — is both.
+			return "", fmt.Errorf("could not ask Docker: %w%s", err, said(out))
 		}
 	}
 
@@ -154,6 +163,24 @@ func containersList(ctx context.Context, _ Args) (string, error) {
 		text += fmt.Sprintf("\n\n%d not running:\n%s", len(other), strings.Join(other, "\n"))
 	}
 	return text, nil
+}
+
+// said renders a command's own output for an error message, or nothing.
+//
+// Trimmed hard: this ends up in a WhatsApp message, and the first line of a
+// refusal is the whole of what it is telling us.
+func said(out string) string {
+	first := strings.TrimSpace(out)
+	if first == "" {
+		return ""
+	}
+	if i := strings.IndexByte(first, '\n'); i >= 0 {
+		first = first[:i]
+	}
+	if len(first) > 200 {
+		first = first[:200]
+	}
+	return " — " + first
 }
 
 // refusedTheSocket reports whether Docker turned us away rather than failing
