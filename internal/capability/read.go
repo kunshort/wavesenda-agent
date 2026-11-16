@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -64,6 +65,70 @@ func serviceList(ctx context.Context, _ Args) (string, error) {
 		return "Nothing is running that systemd knows about.", nil
 	}
 	return fmt.Sprintf("%d services running:\n%s", len(names), strings.Join(names, ", ")), nil
+}
+
+// containersList answers the question most often asked of a machine that runs
+// everything in Docker, and which `service.list` cannot: systemd sees one unit
+// called `docker` and nothing of what is inside it. Asked without this, the
+// agent answered with a list of system daemons and then asked the operator to
+// run `docker ps` themselves — which is the one thing an agent on the box
+// exists to save them doing.
+//
+// Read-only by construction: `ps` with a format string, no container ids
+// accepted, nothing to inject. A machine with no Docker says so rather than
+// failing, because "Docker is not installed here" is an answer and an error is
+// not.
+func containersList(ctx context.Context, _ Args) (string, error) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return "Docker is not installed on this machine.", nil
+	}
+
+	out, err := run(ctx, 15*time.Second,
+		"docker", "ps", "--all", "--no-trunc",
+		"--format", "{{.Names}}\t{{.State}}\t{{.Status}}\t{{.Image}}")
+	if err != nil {
+		// Almost always the daemon being unreachable or this user not being in
+		// the docker group. Said plainly, because both are fixed in one step
+		// and neither is a fault in the container being asked about.
+		return "", fmt.Errorf("could not ask Docker: %w", err)
+	}
+
+	var running, other []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) < 3 {
+			continue
+		}
+		name, state, status := parts[0], parts[1], parts[2]
+		// Health is the half of the answer a bare name hides: a container can
+		// be up and failing its own healthcheck, which is exactly the state
+		// somebody is asking about when a deploy has just gone wrong.
+		entry := fmt.Sprintf("%s — %s", name, status)
+		if state == "running" {
+			running = append(running, entry)
+		} else {
+			other = append(other, entry)
+		}
+		if len(running)+len(other) >= 60 {
+			break
+		}
+	}
+
+	if len(running) == 0 && len(other) == 0 {
+		return "Docker is running and there are no containers at all.", nil
+	}
+
+	text := fmt.Sprintf("%d running:\n%s", len(running), strings.Join(running, "\n"))
+	if len(running) == 0 {
+		text = "Nothing is running."
+	}
+	if len(other) > 0 {
+		text += fmt.Sprintf("\n\n%d not running:\n%s", len(other), strings.Join(other, "\n"))
+	}
+	return text, nil
 }
 
 func serviceStatus(ctx context.Context, args Args) (string, error) {

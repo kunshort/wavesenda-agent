@@ -125,6 +125,7 @@ func Registry() map[string]Capability {
 	all := []Capability{
 		{"server.facts", TierRead, serverFacts},
 		{"service.list", TierRead, serviceList},
+		{"containers.list", TierRead, containersList},
 		{"service.status", TierRead, serviceStatus},
 		{"logs.tail", TierRead, logsTail},
 		{"disk.usage", TierRead, diskUsage},
