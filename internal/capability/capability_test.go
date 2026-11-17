@@ -1,6 +1,9 @@
 package capability
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The argument helpers are the last gate before exec. Everything they let
 // through becomes a real argv entry on a real machine, so the cases that must
@@ -147,5 +150,35 @@ func TestDockerRefusalsAreToldApart(t *testing.T) {
 
 	if refusedTheSocket("Error response from daemon: No such container: web") {
 		t.Error("an ordinary Docker error was treated as a permissions problem")
+	}
+}
+
+func TestContainersAreSummarisedByStateNotOrder(t *testing.T) {
+	// Exactly what `docker ps --format {{.Names}}|{{.State}}|{{.Status}}|{{.Image}}`
+	// prints. The separator is a pipe because a sudoers file can name a pipe
+	// and cannot name a tab, so this is also the test that a change to it does
+	// not quietly turn every container into one unparsed line.
+	out := strings.Join([]string{
+		"tutor_local-caddy-1|running|Up 2 days|caddy:2",
+		"tutor_local-lms-1|running|Up 2 days (healthy)|overhangio/openedx:16",
+		"tutor_local-mysql-1|exited|Exited (0) 3 hours ago|mysql:8",
+	}, "\n")
+
+	got := summariseContainers(out)
+
+	if !strings.HasPrefix(got, "2 running:") {
+		t.Errorf("did not count the running containers: %q", got)
+	}
+	if !strings.Contains(got, "tutor_local-lms-1 — Up 2 days (healthy)") {
+		t.Errorf("dropped the health, which is the half a bare name hides: %q", got)
+	}
+	if !strings.Contains(got, "1 not running:\ntutor_local-mysql-1 — Exited (0) 3 hours ago") {
+		t.Errorf("a stopped container was not listed apart: %q", got)
+	}
+}
+
+func TestNoContainersIsAnAnswerRatherThanAnEmptyList(t *testing.T) {
+	if got := summariseContainers("  \n"); !strings.Contains(got, "no containers") {
+		t.Errorf("an empty Docker said %q", got)
 	}
 }

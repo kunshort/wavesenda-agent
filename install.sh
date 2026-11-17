@@ -87,9 +87,15 @@ wavesenda ALL=(root) NOPASSWD: /usr/bin/certbot renew --cert-name * --non-intera
 # privileged container — root on this machine by another name. `docker ps`
 # cannot change anything, whatever flags it is given.
 #
-# Three paths because sudo matches the one a rule names and Docker is not
+# The exact invocation first, naming every argument, so what the agent may
+# run is one command and not a family of them. The wildcard line stays
+# underneath for the agent that is older than this file.
+#
+# Several paths because sudo matches the one a rule names and Docker is not
 # always in the same place: the packages put it in /usr/bin, and a wrapper
 # in /usr/local/bin shadows that for anything resolving through PATH.
+wavesenda ALL=(root) NOPASSWD: /usr/bin/docker ps --all --no-trunc --format {{.Names}}|{{.State}}|{{.Status}}|{{.Image}}
+wavesenda ALL=(root) NOPASSWD: /usr/local/bin/docker ps --all --no-trunc --format {{.Names}}|{{.State}}|{{.Status}}|{{.Image}}
 wavesenda ALL=(root) NOPASSWD: /usr/bin/docker ps *, /bin/docker ps *, /usr/local/bin/docker ps *
 SUDO
 chmod 0440 /etc/sudoers.d/wavesenda

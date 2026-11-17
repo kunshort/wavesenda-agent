@@ -88,9 +88,17 @@ func containersList(ctx context.Context, _ Args) (string, error) {
 		return "Docker is not installed on this machine.", nil
 	}
 
+	// Separated by a pipe rather than a tab so that this exact invocation can
+	// be written out in a sudoers file. sudoers needs whitespace escaped and
+	// cannot carry a literal tab at all, which left the rule below no way to
+	// name the command and forced it to end in a wildcard — and a wildcard is
+	// both looser than it should be and, depending on how sudo matches
+	// arguments, not a reliable match for this call either. A pipe is special
+	// to neither sudoers nor fnmatch, and appears in no container name,
+	// status or image.
 	args := []string{
 		"ps", "--all", "--no-trunc",
-		"--format", "{{.Names}}\t{{.State}}\t{{.Status}}\t{{.Image}}",
+		"--format", "{{.Names}}|{{.State}}|{{.Status}}|{{.Image}}",
 	}
 
 	out, err := run(ctx, 15*time.Second, docker, args...)
@@ -115,9 +123,8 @@ func containersList(ctx context.Context, _ Args) (string, error) {
 			// "permission denied" about containers they can see running
 			// learns nothing about where the permission is missing.
 			return "", fmt.Errorf("this agent may not talk to Docker here — " +
-				"re-run the installer to grant it `docker ps`, or add " +
-				"`wavesenda ALL=(root) NOPASSWD: /usr/bin/docker ps *` to " +
-				"/etc/sudoers.d/wavesenda")
+				"re-run the installer, which grants it `docker ps` and " +
+				"nothing else about Docker in /etc/sudoers.d/wavesenda")
 		default:
 			// With what was actually said, not only the exit status. A bare
 			// "sudo failed: exit status 1" names neither the reason nor the
@@ -127,12 +134,23 @@ func containersList(ctx context.Context, _ Args) (string, error) {
 		}
 	}
 
+	return summariseContainers(out), nil
+}
+
+// summariseContainers turns `docker ps` output into something worth reading in
+// a chat message.
+//
+// Separate from the call so that the parsing can be tested without Docker: the
+// field separator is the one part of this that a sudoers file also has an
+// opinion about, and a change to it that nothing catches turns every container
+// into one unreadable line.
+func summariseContainers(out string) string {
 	var running, other []string
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		parts := strings.Split(line, "\t")
+		parts := strings.Split(line, "|")
 		if len(parts) < 3 {
 			continue
 		}
@@ -152,7 +170,7 @@ func containersList(ctx context.Context, _ Args) (string, error) {
 	}
 
 	if len(running) == 0 && len(other) == 0 {
-		return "Docker is running and there are no containers at all.", nil
+		return "Docker is running and there are no containers at all."
 	}
 
 	text := fmt.Sprintf("%d running:\n%s", len(running), strings.Join(running, "\n"))
@@ -162,7 +180,7 @@ func containersList(ctx context.Context, _ Args) (string, error) {
 	if len(other) > 0 {
 		text += fmt.Sprintf("\n\n%d not running:\n%s", len(other), strings.Join(other, "\n"))
 	}
-	return text, nil
+	return text
 }
 
 // said renders a command's own output for an error message, or nothing.
