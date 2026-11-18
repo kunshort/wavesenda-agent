@@ -1,6 +1,7 @@
 package main
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/kunshort/wavesenda-agent/internal/capability"
@@ -72,5 +73,17 @@ func TestTheDecisionIsMadeBeforeArgumentsAreRead(t *testing.T) {
 	}
 	if spec.Tier != capability.TierRead {
 		t.Errorf("service.status is tier %q", spec.Tier)
+	}
+}
+
+// The elevation probe reads one line out of /proc, and a typo in the prefix it
+// looks for would make it answer "unknown" for ever — which is the same as not
+// having it, since "unknown" is what a non-Linux machine says too.
+func TestElevationIsKnownOnLinux(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("there is no /proc/self/status to read")
+	}
+	if got := elevation(); got == "unknown" {
+		t.Error("could not read NoNewPrivs out of /proc/self/status")
 	}
 }

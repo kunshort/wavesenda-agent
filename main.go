@@ -85,6 +85,12 @@ func main() {
 	}
 
 	log.Printf("wavesenda-agent %s started", Version)
+	if state := elevation(); state != "ok" {
+		// A warning rather than a refusal to start: the read-only half of this
+		// agent works perfectly well without sudo, and stopping would take
+		// that away too.
+		log.Printf("WARNING: %s — restarts, renewals and Docker will fail", state)
+	}
 	loop(ctx, api, local)
 }
 
@@ -256,7 +262,10 @@ func watch(ctx context.Context) []client.Alert {
 }
 
 func discover(ctx context.Context) map[string]string {
-	facts := map[string]string{"agent_version": Version}
+	facts := map[string]string{
+		"agent_version": Version,
+		"elevation":     elevation(),
+	}
 
 	for name, cap := range map[string]string{
 		"facts":    "server.facts",
@@ -271,6 +280,36 @@ func discover(ctx context.Context) map[string]string {
 		}
 	}
 	return facts
+}
+
+// elevation reports whether this process can use sudo at all.
+//
+// Read from the kernel rather than probed with a command, because the bit is
+// the whole of the answer: with `no_new_privs` set, sudo cannot become root
+// however the sudoers file reads, so every elevated capability fails — a
+// restart, a certificate renewal, `docker ps` — with the same error about a
+// flag nobody set deliberately. systemd sets it as a side effect of several
+// hardening options that do not mention it, which is how a unit that says
+// `NoNewPrivileges=no` ends up forbidding exactly that.
+//
+// Sent with the facts so it is visible in the console, instead of being
+// something an operator discovers by asking the agent to restart nginx.
+func elevation() string {
+	status, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		// Not Linux, or /proc is not mounted. Nothing useful to claim.
+		return "unknown"
+	}
+	for _, line := range strings.Split(string(status), "\n") {
+		if !strings.HasPrefix(line, "NoNewPrivs:") {
+			continue
+		}
+		if strings.TrimSpace(strings.TrimPrefix(line, "NoNewPrivs:")) == "1" {
+			return "blocked: this unit forbids privilege escalation, so sudo cannot run"
+		}
+		return "ok"
+	}
+	return "unknown"
 }
 
 func asSet(values []string) map[string]bool {

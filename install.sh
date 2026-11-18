@@ -119,16 +119,25 @@ ExecStart=/usr/local/bin/wavesenda-agent
 Restart=always
 RestartSec=10
 
-# It reads logs and runs three elevated commands. Everything else is closed.
+# It reads logs and runs a handful of elevated commands, so it needs sudo —
+# and sudo needs setuid, which `NoNewPrivileges=yes` forbids outright.
+#
+# Saying `no` here is not enough on its own, which is the trap this unit fell
+# into: systemd documents ProtectKernelTunables=, ProtectKernelModules=,
+# RestrictSUIDSGID= and LockPersonality= as *implying* NoNewPrivileges=yes,
+# and an implication is not overridden by setting it to no further up. All
+# four were set, so every elevated capability failed with "the no new
+# privileges flag is set" — a restart, a certificate renewal, a disk reclaim
+# and `docker ps` alike — while the agent otherwise looked perfectly healthy.
+#
+# What is left is the hardening that costs nothing here: no writing outside
+# the paths below, no home directories, a private /tmp, and hard ceilings on
+# memory and tasks.
 NoNewPrivileges=no
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
 ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
 MemoryMax=256M
 TasksMax=64
 
@@ -151,6 +160,16 @@ chmod 0755 /usr/local/bin/wavesenda-agent-uninstall
 
 systemctl daemon-reload
 systemctl enable --now wavesenda-agent
+
+# The one property this unit cannot do without, read back from systemd rather
+# than assumed. A hardening option added here later that implies it again
+# would otherwise break every elevated capability silently, which is precisely
+# what happened the first time.
+if [ "$(systemctl show wavesenda-agent -p NoNewPrivileges --value)" = "yes" ]; then
+  printf '\nWarning: this unit forbids privilege escalation, so the agent cannot\n'
+  printf 'restart a service, renew a certificate or read Docker. Check which\n'
+  printf 'option in %s implies NoNewPrivileges.\n' /etc/systemd/system/wavesenda-agent.service
+fi
 
 printf '\nChecking it can reach WaveSenda...\n'
 if sudo -u wavesenda /usr/local/bin/wavesenda-agent --check; then
