@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -78,6 +79,21 @@ func serviceList(ctx context.Context, _ Args) (string, error) {
 // accepted, nothing to inject. A machine with no Docker says so rather than
 // failing, because "Docker is not installed here" is an answer and an error is
 // not.
+// How long Docker gets to answer. Generous on purpose: a box with thirty
+// containers and a busy daemon is exactly the box somebody asks about, and a
+// read that gives up at fifteen seconds reports a failure where there was
+// only a queue.
+const dockerTimeout = 30 * time.Second
+
+// Whether the socket has already turned this process away.
+//
+// A one-way latch, and it exists for the cost of finding out: on a machine
+// where only sudo works, asking the socket first burns a whole timeout before
+// the attempt that was always going to be the one that worked — twice over,
+// since the agent says "one moment" before it starts. After the first refusal
+// the question goes straight to sudo.
+var socketRefusedUs atomic.Bool
+
 func containersList(ctx context.Context, _ Args) (string, error) {
 	// The absolute path, and it is used for both attempts below. sudo matches
 	// what a rule names, and resolving `docker` through its own secure_path
@@ -90,28 +106,36 @@ func containersList(ctx context.Context, _ Args) (string, error) {
 
 	// Separated by a pipe rather than a tab so that this exact invocation can
 	// be written out in a sudoers file. sudoers needs whitespace escaped and
-	// cannot carry a literal tab at all, which left the rule below no way to
-	// name the command and forced it to end in a wildcard — and a wildcard is
-	// both looser than it should be and, depending on how sudo matches
-	// arguments, not a reliable match for this call either. A pipe is special
-	// to neither sudoers nor fnmatch, and appears in no container name,
-	// status or image.
+	// cannot carry a literal tab at all, which left the rule no way to name
+	// the command and forced it to end in a wildcard — both looser than it
+	// should be and not a dependable match for this call. A pipe is special to
+	// neither sudoers nor fnmatch, and appears in no container name, status or
+	// image.
 	args := []string{
 		"ps", "--all", "--no-trunc",
 		"--format", "{{.Names}}|{{.State}}|{{.Status}}|{{.Image}}",
 	}
 
-	out, err := run(ctx, 15*time.Second, docker, args...)
-	if err != nil && refusedTheSocket(out) {
-		// The agent runs as its own unprivileged user and the Docker socket is
-		// root-owned. The usual advice — put the user in the `docker` group —
-		// hands it the ability to start a privileged container, which is root
-		// on the host by another name. The whole point of this agent is that
-		// what it may elevate is a handful of named commands in a file anyone
-		// can read, so `docker ps` becomes one more of them and nothing else
-		// about Docker does.
-		out, err = run(ctx, 15*time.Second, "sudo", append([]string{"-n", docker}, args...)...)
+	var out string
+	if !socketRefusedUs.Load() {
+		out, err = run(ctx, dockerTimeout, docker, args...)
+		if err == nil {
+			return summariseContainers(out), nil
+		}
+		// Any failure, not only a refusal. The agent runs as its own
+		// unprivileged user and the socket is root-owned, and a socket it may
+		// not touch does not always say so quickly — it can hang until the
+		// deadline instead, which looked like Docker being slow and meant the
+		// attempt that works was never made at all.
+		socketRefusedUs.Store(true)
 	}
+
+	// The usual advice — put this user in the `docker` group — would let it
+	// start a privileged container, which is root on the host by another name.
+	// The whole point of this agent is that what it may elevate is a handful
+	// of named commands in a file anyone can read, so `docker ps` is one more
+	// of them and nothing else about Docker is.
+	out, err = run(ctx, dockerTimeout, "sudo", append([]string{"-n", docker}, args...)...)
 	if err != nil {
 		switch {
 		case dockerIsDown(out):
