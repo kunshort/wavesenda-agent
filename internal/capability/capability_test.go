@@ -182,3 +182,53 @@ func TestNoContainersIsAnAnswerRatherThanAnEmptyList(t *testing.T) {
 		t.Errorf("an empty Docker said %q", got)
 	}
 }
+
+func TestTheHeaviestContainerComesFirst(t *testing.T) {
+	// Exactly what `docker stats --no-stream --format
+	// {{.Name}}|{{.MemUsage}}|{{.MemPerc}}|{{.CPUPerc}}` prints, in the order
+	// Docker happens to give it — which is not the order anybody asking "which
+	// one is eating the machine" wants to read.
+	out := strings.Join([]string{
+		"ws_redis|12.4MiB / 7.76GiB|0.16%|0.21%",
+		"pocketloya_qdrant|1.2GiB / 7.76GiB|15.47%|3.90%",
+		"ws_db|412MiB / 7.76GiB|5.18%|1.10%",
+	}, "\n")
+
+	got := summariseStats(out)
+
+	first := strings.Split(got, "\n")[1]
+	if !strings.HasPrefix(first, "pocketloya_qdrant") {
+		t.Errorf("the heaviest container was not first: %q", first)
+	}
+	if !strings.Contains(got, "1.2GiB / 7.76GiB memory") {
+		t.Errorf("dropped the measurement itself: %q", got)
+	}
+	if strings.Index(got, "ws_db") > strings.Index(got, "ws_redis") {
+		t.Error("sorted by something other than memory")
+	}
+}
+
+func TestAContainerWithNoPercentageIsKeptAndSortsLast(t *testing.T) {
+	out := "weird|? / ?|--|--\nbusy|900MiB / 7.76GiB|11.3%|2%"
+
+	got := summariseStats(out)
+
+	if !strings.Contains(got, "weird") {
+		t.Errorf("dropped a container rather than ranking it last: %q", got)
+	}
+	if strings.Index(got, "weird") < strings.Index(got, "busy") {
+		t.Errorf("an unmeasurable container outranked a measured one: %q", got)
+	}
+}
+
+func TestPartialOutputIsCountedAsAnAnswer(t *testing.T) {
+	// The deadline reached mid-list leaves real rows in hand. Reporting "took
+	// too long" while holding a list of containers is the least useful thing
+	// this could do with it.
+	if rows("ws_worker|running|Up About an hour (healthy)|wavesenda-worker") != 1 {
+		t.Error("a real row was not recognised as one")
+	}
+	if rows("sudo: a password is required") != 0 {
+		t.Error("an error message was counted as data")
+	}
+}

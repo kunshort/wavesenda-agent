@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -68,17 +71,6 @@ func serviceList(ctx context.Context, _ Args) (string, error) {
 	return fmt.Sprintf("%d services running:\n%s", len(names), strings.Join(names, ", ")), nil
 }
 
-// containersList answers the question most often asked of a machine that runs
-// everything in Docker, and which `service.list` cannot: systemd sees one unit
-// called `docker` and nothing of what is inside it. Asked without this, the
-// agent answered with a list of system daemons and then asked the operator to
-// run `docker ps` themselves — which is the one thing an agent on the box
-// exists to save them doing.
-//
-// Read-only by construction: `ps` with a format string, no container ids
-// accepted, nothing to inject. A machine with no Docker says so rather than
-// failing, because "Docker is not installed here" is an answer and an error is
-// not.
 // How long Docker gets to answer. Generous on purpose: a box with thirty
 // containers and a busy daemon is exactly the box somebody asks about, and a
 // read that gives up at fifteen seconds reports a failure where there was
@@ -94,71 +86,160 @@ const dockerTimeout = 30 * time.Second
 // the question goes straight to sudo.
 var socketRefusedUs atomic.Bool
 
+// askDocker runs one read-only Docker command, through sudo if it has to.
+//
+// The agent runs as its own unprivileged user and the socket is root-owned.
+// The usual advice — put that user in the `docker` group — would let it start
+// a privileged container, which is root on the host by another name. The whole
+// point of this agent is that what it may elevate is a handful of named
+// commands in a file anyone can read, so each of these is one more of them and
+// nothing else about Docker is.
+func askDocker(ctx context.Context, docker string, args []string) (string, error) {
+	if !socketRefusedUs.Load() {
+		out, err := run(ctx, dockerTimeout, docker, args...)
+		if err == nil {
+			return out, nil
+		}
+		// Any failure, not only a refusal. A socket this user may not touch
+		// does not always say so quickly — it can hang until the deadline
+		// instead, which looked like Docker being slow and meant the attempt
+		// that works was never made at all.
+		socketRefusedUs.Store(true)
+	}
+
+	out, err := run(ctx, dockerTimeout, "sudo", append([]string{"-n", docker}, args...)...)
+	if err == nil {
+		return out, nil
+	}
+
+	// A slow answer is still an answer. Docker on a loaded box writes its rows
+	// as it finds them, so a deadline reached mid-list leaves real data in
+	// hand — and reporting "took too long" while holding a list of containers
+	// is the least useful thing this could do with it.
+	if rows(out) > 0 {
+		return out, errPartial
+	}
+
+	switch {
+	case dockerIsDown(out):
+		// Not an error: "Docker itself is not running" is exactly what
+		// somebody asking after their containers needs to hear.
+		return "", errDockerDown
+	case refusedTheSocket(out):
+		// Said as the one step that fixes it. An operator reading "permission
+		// denied" about containers they can see running learns nothing about
+		// where the permission is missing.
+		return "", fmt.Errorf("this agent may not talk to Docker here — " +
+			"re-run the installer, which grants it the Docker reads and " +
+			"nothing else about Docker in /etc/sudoers.d/wavesenda")
+	default:
+		// With what was actually said, not only the exit status. A bare "sudo
+		// failed: exit status 1" names neither the reason nor the fix, and
+		// sudo's own line — a path the rule does not cover, a password being
+		// asked for — is both.
+		return "", fmt.Errorf("could not ask Docker: %w%s", err, said(out))
+	}
+}
+
+// errDockerDown is a state rather than a failure, so each caller can turn it
+// into the sentence that fits what was asked.
+var errDockerDown = errors.New("the Docker daemon is not running")
+
+// errPartial means the output is real but may be short of the full list.
+var errPartial = errors.New("Docker was still answering")
+
+// rows counts the lines that parsed as a record rather than as noise.
+func rows(out string) int {
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.Contains(line, "|") {
+			n++
+		}
+	}
+	return n
+}
+
+// dockerArgs is the shape every call here takes: a fixed verb and a fixed
+// format string, so the exact invocation can be named in a sudoers file
+// instead of the rule ending in a wildcard.
+//
+// Fields are separated by a pipe rather than a tab because sudoers needs
+// whitespace escaped and cannot carry a literal tab at all. A pipe is special
+// to neither sudoers nor fnmatch, and appears in no container name, status,
+// image or measurement.
+var (
+	listArgs = []string{
+		"ps", "--all", "--no-trunc",
+		"--format", "{{.Names}}|{{.State}}|{{.Status}}|{{.Image}}",
+	}
+	statsArgs = []string{
+		"stats", "--no-stream",
+		"--format", "{{.Name}}|{{.MemUsage}}|{{.MemPerc}}|{{.CPUPerc}}",
+	}
+)
+
+// containersList answers the question most often asked of a machine that runs
+// everything in Docker, and which `service.list` cannot: systemd sees one unit
+// called `docker` and nothing of what is inside it. Asked without this, the
+// agent answered with a list of system daemons and then asked the operator to
+// run `docker ps` themselves — which is the one thing an agent on the box
+// exists to save them doing.
+//
+// Read-only by construction: `ps` with a format string, no container ids
+// accepted, nothing to inject. A machine with no Docker says so rather than
+// failing, because "Docker is not installed here" is an answer and an error is
+// not.
 func containersList(ctx context.Context, _ Args) (string, error) {
-	// The absolute path, and it is used for both attempts below. sudo matches
-	// what a rule names, and resolving `docker` through its own secure_path
-	// can land on a different copy than the one we just found — a wrapper in
-	// /usr/local/bin shadowing /usr/bin/docker is enough for the rule to miss.
 	docker, err := exec.LookPath("docker")
 	if err != nil {
 		return "Docker is not installed on this machine.", nil
 	}
 
-	// Separated by a pipe rather than a tab so that this exact invocation can
-	// be written out in a sudoers file. sudoers needs whitespace escaped and
-	// cannot carry a literal tab at all, which left the rule no way to name
-	// the command and forced it to end in a wildcard — both looser than it
-	// should be and not a dependable match for this call. A pipe is special to
-	// neither sudoers nor fnmatch, and appears in no container name, status or
-	// image.
-	args := []string{
-		"ps", "--all", "--no-trunc",
-		"--format", "{{.Names}}|{{.State}}|{{.Status}}|{{.Image}}",
+	out, err := askDocker(ctx, docker, listArgs)
+	if errors.Is(err, errDockerDown) {
+		return "Docker is installed but its daemon is not running.", nil
 	}
-
-	var out string
-	if !socketRefusedUs.Load() {
-		out, err = run(ctx, dockerTimeout, docker, args...)
-		if err == nil {
-			return summariseContainers(out), nil
-		}
-		// Any failure, not only a refusal. The agent runs as its own
-		// unprivileged user and the socket is root-owned, and a socket it may
-		// not touch does not always say so quickly — it can hang until the
-		// deadline instead, which looked like Docker being slow and meant the
-		// attempt that works was never made at all.
-		socketRefusedUs.Store(true)
+	if errors.Is(err, errPartial) {
+		return summariseContainers(out) +
+			"\n\n(Docker was still answering when I ran out of time, so there " +
+			"may be more.)", nil
 	}
-
-	// The usual advice — put this user in the `docker` group — would let it
-	// start a privileged container, which is root on the host by another name.
-	// The whole point of this agent is that what it may elevate is a handful
-	// of named commands in a file anyone can read, so `docker ps` is one more
-	// of them and nothing else about Docker is.
-	out, err = run(ctx, dockerTimeout, "sudo", append([]string{"-n", docker}, args...)...)
 	if err != nil {
-		switch {
-		case dockerIsDown(out):
-			// An answer, not a failure: "Docker itself is not running" is
-			// exactly what somebody asking after their containers needs.
-			return "Docker is installed but its daemon is not running.", nil
-		case refusedTheSocket(out):
-			// Said as the one step that fixes it. An operator reading
-			// "permission denied" about containers they can see running
-			// learns nothing about where the permission is missing.
-			return "", fmt.Errorf("this agent may not talk to Docker here — " +
-				"re-run the installer, which grants it `docker ps` and " +
-				"nothing else about Docker in /etc/sudoers.d/wavesenda")
-		default:
-			// With what was actually said, not only the exit status. A bare
-			// "sudo failed: exit status 1" names neither the reason nor the
-			// fix, and sudo's own line — a path the rule does not cover, a
-			// password being asked for — is both.
-			return "", fmt.Errorf("could not ask Docker: %w%s", err, said(out))
-		}
+		return "", err
+	}
+	return summariseContainers(out), nil
+}
+
+// containersStats answers "which one is eating the machine".
+//
+// The list above cannot: it knows what is running and whether it is healthy,
+// and nothing at all about what any of it costs. Asked for the heaviest
+// container, an agent with only the list did the one thing worse than
+// refusing — it printed every container and then promised statistics it had
+// no way to fetch.
+//
+// `memory.usage` is not this either. It reports the machine's largest
+// processes, and on a box where everything is containerised those are a dozen
+// anonymous runtimes whose names say nothing about which service they are.
+func containersStats(ctx context.Context, _ Args) (string, error) {
+	docker, err := exec.LookPath("docker")
+	if err != nil {
+		return "Docker is not installed on this machine.", nil
 	}
 
-	return summariseContainers(out), nil
+	out, err := askDocker(ctx, docker, statsArgs)
+	if errors.Is(err, errDockerDown) {
+		return "Docker is installed but its daemon is not running, so there is nothing to measure.", nil
+	}
+	if errors.Is(err, errPartial) {
+		return summariseStats(out) +
+			"\n\n(Docker was still measuring when I ran out of time, so a " +
+			"heavier one may be missing.)", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return summariseStats(out), nil
 }
 
 // summariseContainers turns `docker ps` output into something worth reading in
@@ -207,22 +288,49 @@ func summariseContainers(out string) string {
 	return text
 }
 
-// said renders a command's own output for an error message, or nothing.
+// summariseStats puts the heaviest container first.
 //
-// Trimmed hard: this ends up in a WhatsApp message, and the first line of a
-// refusal is the whole of what it is telling us.
-func said(out string) string {
-	first := strings.TrimSpace(out)
-	if first == "" {
-		return ""
+// Sorted here rather than left to the model, because the question is almost
+// always a superlative — which one is the worst — and an unordered list of
+// thirty measurements is an invitation to answer it wrongly. Only the top of
+// the list is sent: nobody asks after the twenty-fifth hungriest container.
+func summariseStats(out string) string {
+	type row struct {
+		name  string
+		mem   string
+		share float64
+		cpu   string
 	}
-	if i := strings.IndexByte(first, '\n'); i >= 0 {
-		first = first[:i]
+
+	var rows []row
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		parts := strings.Split(strings.TrimSpace(line), "|")
+		if len(parts) < 4 || parts[0] == "" {
+			continue
+		}
+		share, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(parts[2]), "%"), 64)
+		if err != nil {
+			// A container that reports no percentage still belongs in the
+			// list; it simply sorts last rather than being dropped.
+			share = -1
+		}
+		rows = append(rows, row{parts[0], parts[1], share, parts[3]})
 	}
-	if len(first) > 200 {
-		first = first[:200]
+
+	if len(rows) == 0 {
+		return "Docker is running and there is nothing to measure."
 	}
-	return " — " + first
+
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].share > rows[j].share })
+	if len(rows) > 15 {
+		rows = rows[:15]
+	}
+
+	lines := make([]string, 0, len(rows))
+	for _, r := range rows {
+		lines = append(lines, fmt.Sprintf("%s — %s memory, %s CPU", r.name, r.mem, r.cpu))
+	}
+	return "By memory, heaviest first:\n" + strings.Join(lines, "\n")
 }
 
 // refusedTheSocket reports whether Docker turned us away rather than failing
@@ -243,6 +351,24 @@ func dockerIsDown(out string) bool {
 	lowered := strings.ToLower(out)
 	return strings.Contains(lowered, "is the docker daemon running") ||
 		strings.Contains(lowered, "cannot connect to the docker daemon")
+}
+
+// said renders a command's own output for an error message, or nothing.
+//
+// Trimmed hard: this ends up in a WhatsApp message, and the first line of a
+// refusal is the whole of what it is telling us.
+func said(out string) string {
+	first := strings.TrimSpace(out)
+	if first == "" {
+		return ""
+	}
+	if i := strings.IndexByte(first, '\n'); i >= 0 {
+		first = first[:i]
+	}
+	if len(first) > 200 {
+		first = first[:200]
+	}
+	return " — " + first
 }
 
 func serviceStatus(ctx context.Context, args Args) (string, error) {

@@ -96,7 +96,10 @@ wavesenda ALL=(root) NOPASSWD: /usr/bin/certbot renew --cert-name * --non-intera
 # in /usr/local/bin shadows that for anything resolving through PATH.
 wavesenda ALL=(root) NOPASSWD: /usr/bin/docker ps --all --no-trunc --format {{.Names}}|{{.State}}|{{.Status}}|{{.Image}}
 wavesenda ALL=(root) NOPASSWD: /usr/local/bin/docker ps --all --no-trunc --format {{.Names}}|{{.State}}|{{.Status}}|{{.Image}}
+wavesenda ALL=(root) NOPASSWD: /usr/bin/docker stats --no-stream --format {{.Name}}|{{.MemUsage}}|{{.MemPerc}}|{{.CPUPerc}}
+wavesenda ALL=(root) NOPASSWD: /usr/local/bin/docker stats --no-stream --format {{.Name}}|{{.MemUsage}}|{{.MemPerc}}|{{.CPUPerc}}
 wavesenda ALL=(root) NOPASSWD: /usr/bin/docker ps *, /bin/docker ps *, /usr/local/bin/docker ps *
+wavesenda ALL=(root) NOPASSWD: /usr/bin/docker stats *, /bin/docker stats *, /usr/local/bin/docker stats *
 SUDO
 chmod 0440 /etc/sudoers.d/wavesenda
 visudo -cf /etc/sudoers.d/wavesenda >/dev/null || {
@@ -138,7 +141,11 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 ProtectControlGroups=yes
-MemoryMax=256M
+# 512M, not the 256M this started with. The agent itself is small, but it
+# execs the Docker client — a 47 MB binary — and a cgroup that cannot
+# comfortably hold both does not fail: it thrashes, and `docker ps` goes from
+# instant to slower than the read's own deadline.
+MemoryMax=512M
 TasksMax=64
 
 [Install]
